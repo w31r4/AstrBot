@@ -1137,13 +1137,14 @@ def _apply_sandbox_tools(
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileEditTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(GrepTool))
     if booter == "shipyard_neo":
-        # Neo-specific path rule: filesystem tools operate relative to sandbox
-        # workspace root. Do not prepend "/workspace".
+        # Neo accepts workspace-relative paths and explicit policy-approved roots.
         req.system_prompt += (
             "\n[Shipyard Neo File Path Rule]\n"
             "When using sandbox filesystem tools (upload/download/read/write/list/delete), "
-            "always pass paths relative to the sandbox workspace root. "
-            "Example: use `baidu_homepage.png` instead of `/workspace/baidu_homepage.png`.\n"
+            "relative paths are rooted at `/workspace`. You may also explicitly pass "
+            "`/workspace/...` or `/tmp/...`. `/tmp` is local to the current Ship "
+            "container, is not shared with other containers, and is not guaranteed to "
+            "survive a restart; use `/workspace` for cross-container file exchange.\n"
         )
 
         req.system_prompt += (

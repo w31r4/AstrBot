@@ -1,6 +1,4 @@
-import json
 import os
-import shlex
 import uuid
 from pathlib import Path
 
@@ -180,26 +178,38 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
                         f"Blocked path: {local_candidate}."
                     )
 
+        sb = await get_booter(
+            context.context.context,
+            context.context.event.unified_msg_origin,
+        )
+        name = _remote_basename(path) or os.path.basename(path)
+        local_path = Path(get_astrbot_temp_path()) / (
+            f"sandbox_{uuid.uuid4().hex[:4]}_{name}"
+        )
         try:
-            sb = await get_booter(
-                context.context.context,
-                context.context.event.unified_msg_origin,
-            )
-            quoted_path = shlex.quote(path)
-            result = await sb.shell.exec(f"test -f {quoted_path} && echo '_&exists_'")
-            if "_&exists_" in json.dumps(result):
-                name = _remote_basename(path) or os.path.basename(path)
-                local_path = os.path.join(
-                    get_astrbot_temp_path(), f"sandbox_{uuid.uuid4().hex[:4]}_{name}"
-                )
-                await sb.download_file(path, local_path)
-                logger.info(f"Downloaded file from sandbox: {path} -> {local_path}")
-                return local_path, True
+            await sb.download_file(path, str(local_path))
         except Exception as exc:
-            logger.warning(f"Failed to check/download file from sandbox: {exc}")
+            try:
+                local_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            error_code = getattr(exc, "code", None)
+            if error_code == "file_not_found":
+                raise FileNotFoundError(
+                    f"{component_type} path does not exist: {path}"
+                ) from exc
+            if error_code == "invalid_path":
+                error_message = getattr(exc, "message", str(exc))
+                error_details = getattr(exc, "details", None)
+                if isinstance(error_details, dict) and error_details:
+                    error_message = f"{error_message}: {error_details}"
+                raise ValueError(f"invalid_path: {error_message}") from exc
+            logger.warning("Failed to download file from sandbox: %s", exc)
             raise
 
-        raise FileNotFoundError(f"{component_type} path does not exist: {path}")
+        logger.info("Downloaded file from sandbox: %s -> %s", path, local_path)
+        return str(local_path), True
 
     async def call(
         self, context: ContextWrapper[AstrAgentContext], **kwargs

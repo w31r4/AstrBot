@@ -1,5 +1,6 @@
 """Tests for send_message_to_user session handling."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +9,21 @@ import pytest
 from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.pipeline.respond.stage import RespondStage
 from astrbot.core.tools.message_tools import SendMessageToUserTool
+
+
+class _SandboxDownloadError(Exception):
+    """Minimal SDK-shaped error used by sandbox download tests."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self.code = code
+        self.message = message
+        self.details = details or {}
+        super().__init__(message)
 
 
 def _make_context(
@@ -359,10 +375,10 @@ async def test_non_admin_can_send_temp_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_message_downloads_windows_sandbox_file_with_original_name(
+async def test_send_message_downloads_absolute_sandbox_file_with_original_name(
     tmp_path, monkeypatch
 ):
-    """Windows sandbox paths keep their basename when sent as files."""
+    """A sandbox absolute path downloads directly without a shell precheck."""
     tool = SendMessageToUserTool()
     ctx = _make_context(runtime="sandbox")
     temp_root = tmp_path / "temp"
@@ -372,17 +388,13 @@ async def test_send_message_downloads_windows_sandbox_file_with_original_name(
         lambda: str(temp_root),
     )
 
-    async def _exec(_command):
-        return {"content": "_&exists_"}
-
     async def _download_file(_remote_path, local_path):
+        assert _remote_path == "/tmp/report.txt"
         assert local_path.endswith("report.txt")
-        assert "\\" not in local_path
         with open(local_path, "w", encoding="utf-8") as file:
             file.write("report")
 
     booter = SimpleNamespace(
-        shell=SimpleNamespace(exec=AsyncMock(side_effect=_exec)),
         download_file=AsyncMock(side_effect=_download_file),
     )
 
@@ -397,10 +409,11 @@ async def test_send_message_downloads_windows_sandbox_file_with_original_name(
 
     result = await tool.call(
         ctx,
-        messages=[{"type": "file", "path": r"C:\Users\AstrBot\report.txt"}],
+        messages=[{"type": "file", "path": "/tmp/report.txt"}],
     )
 
     assert "Message sent to session" in result
+    booter.download_file.assert_awaited_once()
     sent_chain = ctx.context.context.send_message.await_args.args[1]
     sent_file = sent_chain.chain[0]
     assert sent_file.name == "report.txt"
@@ -419,16 +432,13 @@ async def test_send_message_downloads_trailing_slash_sandbox_file_with_basename(
         lambda: str(temp_root),
     )
 
-    async def _exec(_command):
-        return {"content": "_&exists_"}
-
     async def _download_file(_remote_path, local_path):
+        assert _remote_path == "reports/export/"
         assert local_path.endswith("export")
         with open(local_path, "w", encoding="utf-8") as file:
             file.write("export")
 
     booter = SimpleNamespace(
-        shell=SimpleNamespace(exec=AsyncMock(side_effect=_exec)),
         download_file=AsyncMock(side_effect=_download_file),
     )
 
@@ -450,3 +460,119 @@ async def test_send_message_downloads_trailing_slash_sandbox_file_with_basename(
     sent_chain = ctx.context.context.send_message.await_args.args[1]
     sent_file = sent_chain.chain[0]
     assert sent_file.name == "export"
+
+
+@pytest.mark.asyncio
+async def test_send_message_maps_missing_sandbox_file_to_clear_error(monkeypatch):
+    """A filesystem not-found error is reported without requiring a shell call."""
+    tool = SendMessageToUserTool()
+    ctx = _make_context(runtime="sandbox")
+    remote_path = "/tmp/astrbot-path-policy-missing-file.txt"
+    booter = SimpleNamespace(
+        download_file=AsyncMock(
+            side_effect=_SandboxDownloadError(
+                "file_not_found",
+                "File not found",
+            )
+        )
+    )
+
+    async def mock_get_booter(*args, **kwargs):
+        del args, kwargs
+        return booter
+
+    monkeypatch.setattr(
+        "astrbot.core.tools.message_tools.get_booter",
+        mock_get_booter,
+    )
+
+    result = await tool.call(
+        ctx,
+        messages=[{"type": "file", "path": remote_path}],
+    )
+
+    assert result == f"error: file path does not exist: {remote_path}"
+    booter.download_file.assert_awaited_once()
+    ctx.context.context.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_message_preserves_invalid_path_details(monkeypatch):
+    """The server's invalid_path reason remains visible to the tool caller."""
+    tool = SendMessageToUserTool()
+    ctx = _make_context(runtime="sandbox")
+    booter = SimpleNamespace(
+        download_file=AsyncMock(
+            side_effect=_SandboxDownloadError(
+                "invalid_path",
+                "path is outside the allowed roots",
+                {
+                    "reason": "outside_allowed_roots",
+                    "allowed_roots": ["/workspace", "/tmp"],
+                },
+            )
+        )
+    )
+
+    async def mock_get_booter(*args, **kwargs):
+        del args, kwargs
+        return booter
+
+    monkeypatch.setattr(
+        "astrbot.core.tools.message_tools.get_booter",
+        mock_get_booter,
+    )
+
+    result = await tool.call(
+        ctx,
+        messages=[{"type": "file", "path": "/outside/blocked.txt"}],
+    )
+
+    assert "invalid_path: path is outside the allowed roots" in result
+    assert "outside_allowed_roots" in result
+    assert "allowed_roots" in result
+    ctx.context.context.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_message_removes_partial_sandbox_download_on_failure(
+    tmp_path, monkeypatch
+):
+    """A failed sandbox transfer does not leave its temporary output behind."""
+    tool = SendMessageToUserTool()
+    ctx = _make_context(runtime="sandbox")
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    monkeypatch.setattr(
+        "astrbot.core.tools.message_tools.get_astrbot_temp_path",
+        lambda: str(temp_root),
+    )
+    partial_path: Path | None = None
+
+    async def download_file(_remote_path: str, local_path: str) -> None:
+        nonlocal partial_path
+        partial_path = Path(local_path)
+        partial_path.write_bytes(b"partial")
+        raise RuntimeError("download failed")
+
+    booter = SimpleNamespace(download_file=AsyncMock(side_effect=download_file))
+
+    async def mock_get_booter(*args, **kwargs):
+        del args, kwargs
+        return booter
+
+    monkeypatch.setattr(
+        "astrbot.core.tools.message_tools.get_booter",
+        mock_get_booter,
+    )
+
+    result = await tool.call(
+        ctx,
+        messages=[{"type": "file", "path": "/tmp/astrbot-partial.bin"}],
+    )
+
+    assert "error: failed to build messages[0] component: download failed" in result
+    assert partial_path is not None
+    assert not partial_path.exists()
+    assert list(temp_root.iterdir()) == []
+    ctx.context.context.send_message.assert_not_called()

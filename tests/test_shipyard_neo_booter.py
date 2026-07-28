@@ -222,6 +222,51 @@ class TestShutdown:
 
 
 # ═══════════════════════════════════════════════════════════════
+# filesystem path forwarding
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestFilesystemPathForwarding:
+    """Neo booter leaves remote filesystem paths intact for the SDK."""
+
+    @staticmethod
+    def _make_booter():
+        from astrbot.core.computer.booters.shipyard_neo import ShipyardNeoBooter
+
+        return ShipyardNeoBooter(
+            endpoint_url="http://localhost:8114",
+            access_token="sk-bay-test",
+        )
+
+    @pytest.mark.asyncio
+    async def test_upload_keeps_absolute_remote_path(self, tmp_path):
+        """Uploading to /tmp does not strip the leading slash."""
+        booter = self._make_booter()
+        source = tmp_path / "report.txt"
+        source.write_bytes(b"report")
+        filesystem = SimpleNamespace(upload=AsyncMock())
+        booter._sandbox = SimpleNamespace(filesystem=filesystem)  # type: ignore[assignment]
+
+        result = await booter.upload_file(str(source), "/tmp/report.txt")
+
+        filesystem.upload.assert_awaited_once_with("/tmp/report.txt", b"report")
+        assert result["file_path"] == "/tmp/report.txt"
+
+    @pytest.mark.asyncio
+    async def test_download_keeps_absolute_remote_path(self, tmp_path):
+        """Downloading from /workspace forwards the exact SDK path."""
+        booter = self._make_booter()
+        filesystem = SimpleNamespace(download=AsyncMock(return_value=b"report"))
+        booter._sandbox = SimpleNamespace(filesystem=filesystem)  # type: ignore[assignment]
+        destination = tmp_path / "nested" / "report.txt"
+
+        await booter.download_file("/workspace/report.txt", str(destination))
+
+        filesystem.download.assert_awaited_once_with("/workspace/report.txt")
+        assert destination.read_bytes() == b"report"
+
+
+# ═══════════════════════════════════════════════════════════════
 # get_booter rebuild path
 # ═══════════════════════════════════════════════════════════════
 

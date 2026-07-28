@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shlex
+from pathlib import Path
 from typing import Any, cast
 
 from astrbot.api import logger
@@ -657,26 +657,22 @@ class ShipyardNeoBooter(ComputerBooter):
     async def upload_file(self, path: str, file_name: str) -> dict:
         if self._sandbox is None:
             raise RuntimeError("ShipyardNeoBooter is not initialized.")
-        with open(path, "rb") as f:
-            content = f.read()
-        remote_path = file_name.lstrip("/")
-        await self._sandbox.filesystem.upload(remote_path, content)
-        logger.info("[Computer] File uploaded to Neo sandbox: %s", remote_path)
+        content = Path(path).read_bytes()
+        await self._sandbox.filesystem.upload(file_name, content)
+        logger.info("[Computer] File uploaded to Neo sandbox: %s", file_name)
         return {
             "success": True,
             "message": "File uploaded successfully",
-            "file_path": remote_path,
+            "file_path": file_name,
         }
 
     async def download_file(self, remote_path: str, local_path: str) -> None:
         if self._sandbox is None:
             raise RuntimeError("ShipyardNeoBooter is not initialized.")
-        content = await self._sandbox.filesystem.download(remote_path.lstrip("/"))
-        local_dir = os.path.dirname(local_path)
-        if local_dir:
-            os.makedirs(local_dir, exist_ok=True)
-        with open(local_path, "wb") as f:
-            f.write(cast(bytes, content))
+        content = await self._sandbox.filesystem.download(remote_path)
+        destination = Path(local_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(cast(bytes, content))
         logger.info(
             "[Computer] File downloaded from Neo sandbox: %s -> %s",
             remote_path,
