@@ -265,6 +265,20 @@ class TestFilesystemPathForwarding:
         filesystem.download.assert_awaited_once_with("/workspace/report.txt")
         assert destination.read_bytes() == b"report"
 
+    @pytest.mark.asyncio
+    async def test_download_keeps_unicode_absolute_remote_path(self, tmp_path):
+        """Issue #7342: absolute Unicode paths reach the SDK without truncation."""
+        booter = self._make_booter()
+        filesystem = SimpleNamespace(download=AsyncMock(return_value=b"workbook"))
+        booter._sandbox = SimpleNamespace(filesystem=filesystem)  # type: ignore[assignment]
+        remote_path = "/workspace/数字1到10 🧪.xlsx"
+        destination = tmp_path / "exports" / "数字1到10 🧪.xlsx"
+
+        await booter.download_file(remote_path, str(destination))
+
+        filesystem.download.assert_awaited_once_with(remote_path)
+        assert destination.read_bytes() == b"workbook"
+
 
 # ═══════════════════════════════════════════════════════════════
 # get_booter rebuild path

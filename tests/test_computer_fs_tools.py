@@ -104,6 +104,43 @@ async def test_sandbox_file_download_handles_windows_remote_filename(
 
 
 @pytest.mark.asyncio
+async def test_sandbox_file_download_preserves_unicode_absolute_remote_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    """Issue #7342: astrbot_download_file keeps its exact remote path."""
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    remote_path = "/workspace/数字1到10 🧪.xlsx"
+
+    monkeypatch.setattr(
+        fs_tools,
+        "get_astrbot_temp_path",
+        lambda: str(temp_root),
+    )
+    booter = SimpleNamespace(download_file=AsyncMock())
+
+    async def _fake_get_booter(_ctx, _umo):
+        return booter
+
+    monkeypatch.setattr(fs_tools, "get_booter", _fake_get_booter)
+
+    context = _make_sandbox_context()
+    result = await fs_tools.FileDownloadTool().call(
+        context,
+        remote_path=remote_path,
+        also_send_to_user=True,
+    )
+
+    assert "数字1到10 🧪.xlsx" in result
+    booter.download_file.assert_awaited_once()
+    assert booter.download_file.await_args.args[0] == remote_path
+    sent_chain = context.context.event.send.await_args.args[0]
+    sent_file = sent_chain.chain[0]
+    assert sent_file.name == "数字1到10 🧪.xlsx"
+
+
+@pytest.mark.asyncio
 async def test_sandbox_file_download_strips_trailing_remote_slash(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
